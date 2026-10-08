@@ -15,9 +15,23 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = 500.0
-RISK = 10.0
-COMMISSION = 0.70
-SYMBOLS = ("EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDCHF=X")
+RISK = 200.0
+COMMISSION = 1.40
+SYMBOLS = (
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "USDCHF=X",
+    "AUDUSD=X",
+    "NZDUSD=X",
+    "USDCAD=X",
+    "EURGBP=X",
+    "GBPNZD=X",
+    "AUDJPY=X",
+    "GBPJPY=X",
+    "CADJPY=X",
+    "GC=F",
+)
 
 equity = START
 positions: dict[str, dict] = {}
@@ -65,7 +79,7 @@ def maybe_open() -> None:
         if s in positions:
             continue
         side = "long" if int(px * 10000) % 2 == 0 else "short"
-        risk = px * 0.0015
+        risk = px * 0.004
         stop = px - risk if side == "long" else px + risk
         take = px + risk * 2 if side == "long" else px - risk * 2
         equity -= COMMISSION
@@ -92,7 +106,7 @@ def mark() -> None:
             done.append(s)
     for s in done:
         del positions[s]
-    while len(positions) < 2 and len(positions) < len(prices):
+    if not positions:
         maybe_open()
 
 
@@ -131,7 +145,7 @@ main{max-width:760px;margin:0 auto;padding:18px 14px 40px}
 .row{display:flex;justify-content:space-between;margin-top:4px;color:#ccc}
 </style></head><body><main>
 <h1>Paper FX</h1>
-<p class="muted">Цены Yahoo по EURUSD, GBPUSD, USDJPY, AUDCHF. Ордера бумажные, брокер не подключён.</p>
+<p class="muted">Цены Yahoo, пары Алекса и золото. Бумага $500, риск $200, тейк 2R. Не брокер.</p>
 <div class="grid">
 <div class="card">депозит<b id="eq">—</b></div>
 <div class="card">pnl<b id="pnl">—</b></div>
