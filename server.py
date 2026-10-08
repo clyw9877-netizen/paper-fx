@@ -1,91 +1,127 @@
 """
-Бумажный FX-сервер для Railway.
-Крутится сам, пока жив процесс. Страница только читает /api/state.
-Депозит $500. Не брокер. Ордеров нет.
-Логика урезана до кода: не больше 2 позиций, риск $10, тейк 2R, стоп 1R.
+Бумажный FX на реальных котировках Yahoo.
+EURUSD=X, GBPUSD=X, USDJPY=X, AUDCHF=X. Без ключа.
+Ордеров на брокер нет. Депозит $500, риск $10, тейк 2R, комиссия $0.70 на сторону.
+Если Yahoo молчит — второй хост, потом страница пишет, что лента старая.
 """
 
 from __future__ import annotations
 
 import json
-import random
+import os
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = 500.0
 RISK = 10.0
-COMMISSION = 0.70  # $ за сторону, вход и выход. Не реальный прайс брокера.
-PAIRS = [
-    {"s": "EURUSD", "p": 1.0850},
-    {"s": "GBPUSD", "p": 1.3120},
-    {"s": "USDJPY", "p": 149.20},
-    {"s": "AUDCHF", "p": 0.5650},
-]
+COMMISSION = 0.70
+SYMBOLS = ("EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDCHF=X")
 
 equity = START
-positions: list[dict] = []
+positions: dict[str, dict] = {}
 closed: list[dict] = []
+prices: dict[str, float] = {}
+source = "нет данных"
 lock = threading.Lock()
-rng = random.Random()
 
 
-def tick() -> None:
-    global equity
+def fetch_one(symbol: str, host: str) -> float:
+    url = f"https://{host}/v8/finance/chart/{symbol}?range=1d&interval=1m"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        data = json.loads(resp.read().decode())
+    closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+    last = next(x for x in reversed(closes) if x is not None)
+    return float(last)
+
+
+def refresh_prices() -> None:
+    global source
+    got: dict[str, float] = {}
+    used = ""
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            for s in SYMBOLS:
+                got[s] = fetch_one(s, host)
+            used = f"Yahoo {host} 1m"
+            break
+        except Exception:
+            got = {}
     with lock:
-        for x in PAIRS:
-            x["p"] *= 1 + (rng.random() - 0.48) * 0.0012
-        still = []
-        for p in positions:
-            px = next(x["p"] for x in PAIRS if x["s"] == p["s"])
-            direction = 1 if p["side"] == "long" else -1
-            p["u"] = (px - p["entry"]) / abs(p["entry"] - p["stop"]) * RISK * direction
-            hit_stop = px <= p["stop"] if p["side"] == "long" else px >= p["stop"]
-            hit_take = px >= p["take"] if p["side"] == "long" else px <= p["take"]
-            if hit_stop or hit_take:
-                pnl = (RISK * 2 if hit_take else -RISK) - COMMISSION
-                equity += pnl
-                closed.insert(0, {"s": p["s"], "side": p["side"], "pnl": pnl, "why": "тейк" if hit_take else "стоп"})
-                del closed[30:]
-            else:
-                still.append(p)
-        positions[:] = still
-        if len(positions) < 2 and rng.random() < 0.25:
-            x = rng.choice(PAIRS)
-            if any(p["s"] == x["s"] for p in positions):
-                return
-            side = "long" if rng.random() > 0.5 else "short"
-            entry = x["p"]
-            risk = entry * 0.0025
-            stop = entry - risk if side == "long" else entry + risk
-            take = entry + risk * 2 if side == "long" else entry - risk * 2
-            equity -= COMMISSION
-            positions.append({"s": x["s"], "side": side, "entry": entry, "stop": stop, "take": take, "u": 0.0})
+        if got:
+            prices.update(got)
+            source = used
+        else:
+            source = "Yahoo недоступен, цены старые"
+
+
+def maybe_open() -> None:
+    global equity
+    if len(positions) >= 2 or not prices:
+        return
+    for s, px in prices.items():
+        if s in positions:
+            continue
+        side = "long" if int(px * 10000) % 2 == 0 else "short"
+        risk = px * 0.0015
+        stop = px - risk if side == "long" else px + risk
+        take = px + risk * 2 if side == "long" else px - risk * 2
+        equity -= COMMISSION
+        positions[s] = {"s": s, "side": side, "entry": px, "stop": stop, "take": take, "u": 0.0}
+        return
+
+
+def mark() -> None:
+    global equity
+    done = []
+    for s, p in positions.items():
+        px = prices.get(s)
+        if px is None:
+            continue
+        direction = 1 if p["side"] == "long" else -1
+        p["u"] = (px - p["entry"]) / abs(p["entry"] - p["stop"]) * RISK * direction
+        hit_stop = px <= p["stop"] if p["side"] == "long" else px >= p["stop"]
+        hit_take = px >= p["take"] if p["side"] == "long" else px <= p["take"]
+        if hit_stop or hit_take:
+            pnl = (RISK * 2 if hit_take else -RISK) - COMMISSION
+            equity += pnl
+            closed.insert(0, {"s": s, "side": p["side"], "pnl": round(pnl, 2), "why": "тейк" if hit_take else "стоп"})
+            del closed[30:]
+            done.append(s)
+    for s in done:
+        del positions[s]
+    if not positions:
+        maybe_open()
 
 
 def snapshot() -> dict:
     with lock:
-        unreal = sum(p["u"] for p in positions)
+        unreal = sum(p["u"] for p in positions.values())
         return {
             "equity": round(equity + unreal, 2),
             "pnl": round(equity + unreal - START, 2),
-            "start": START,
-            "open": positions,
+            "source": source,
+            "prices": prices,
+            "open": list(positions.values()),
             "closed": closed[:12],
-            "note": "paper only, fake prices, no broker",
+            "note": "real yahoo quotes, paper orders only",
         }
 
 
 def loop() -> None:
     while True:
-        tick()
-        time.sleep(2)
+        refresh_prices()
+        with lock:
+            mark()
+        time.sleep(30)
 
 
 PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Paper FX</title>
+<title>Paper FX real</title>
 <style>
 body{margin:0;font-family:-apple-system,sans-serif;background:#101010;color:#f3f3f3}
 main{max-width:760px;margin:0 auto;padding:18px 14px 40px}
@@ -95,12 +131,13 @@ main{max-width:760px;margin:0 auto;padding:18px 14px 40px}
 .row{display:flex;justify-content:space-between;margin-top:4px;color:#ccc}
 </style></head><body><main>
 <h1>Paper FX</h1>
-<p class="muted">Сервер крутит бумагу сам. Депозит $500. Это не брокер.</p>
+<p class="muted">Цены Yahoo по EURUSD, GBPUSD, USDJPY, AUDCHF. Ордера бумажные, брокер не подключён.</p>
 <div class="grid">
 <div class="card">депозит<b id="eq">—</b></div>
 <div class="card">pnl<b id="pnl">—</b></div>
 <div class="card">открыто<b id="n">—</b></div>
 </div>
+<p class="muted" id="src"></p>
 <h2>Висит</h2><div id="live"></div>
 <h2>Закрытые</h2><div id="hist"></div>
 <script>
@@ -111,15 +148,16 @@ async function refresh(){
   p.textContent = (s.pnl>=0?'+':'') + s.pnl.toFixed(2);
   p.className = s.pnl>=0?'up':'down';
   document.getElementById('n').textContent = s.open.length;
+  document.getElementById('src').textContent = s.source;
   document.getElementById('live').innerHTML = s.open.map(x =>
     `<div class="card"><div class="row"><b class="${x.side=='long'?'up':'down'}">${x.s} ${x.side}</b><b class="${x.u>=0?'up':'down'}">${x.u.toFixed(2)}</b></div>
-     <div class="row"><span>вход</span><span>${x.entry.toFixed(4)}</span></div>
-     <div class="row"><span>стоп</span><span>${x.stop.toFixed(4)}</span></div>
-     <div class="row"><span>тейк</span><span>${x.take.toFixed(4)}</span></div></div>`).join('') || '<div class="card">пусто</div>';
+     <div class="row"><span>вход</span><span>${x.entry.toFixed(5)}</span></div>
+     <div class="row"><span>стоп</span><span>${x.stop.toFixed(5)}</span></div>
+     <div class="row"><span>тейк 2R</span><span>${x.take.toFixed(5)}</span></div></div>`).join('') || '<div class="card">ждёт цену</div>';
   document.getElementById('hist').innerHTML = s.closed.map(x =>
     `<div class="card"><div class="row"><span>${x.s} ${x.side} ${x.why}</span><b class="${x.pnl>=0?'up':'down'}">${x.pnl.toFixed(2)}</b></div></div>`).join('');
 }
-refresh(); setInterval(refresh, 2000);
+refresh(); setInterval(refresh, 5000);
 </script></main></body></html>"""
 
 
@@ -142,8 +180,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", "8080"))
     threading.Thread(target=loop, daemon=True).start()
-    print(f"paper fx on :{port}")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
