@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 START = 500.0
 RISK = 10.0
+COMMISSION = 0.70  # $ за сторону, вход и выход. Не реальный прайс брокера.
 PAIRS = [
     {"s": "EURUSD", "p": 1.0850},
     {"s": "GBPUSD", "p": 1.3120},
@@ -42,7 +43,7 @@ def tick() -> None:
             hit_stop = px <= p["stop"] if p["side"] == "long" else px >= p["stop"]
             hit_take = px >= p["take"] if p["side"] == "long" else px <= p["take"]
             if hit_stop or hit_take:
-                pnl = RISK * 2 if hit_take else -RISK
+                pnl = (RISK * 2 if hit_take else -RISK) - COMMISSION
                 equity += pnl
                 closed.insert(0, {"s": p["s"], "side": p["side"], "pnl": pnl, "why": "тейк" if hit_take else "стоп"})
                 del closed[30:]
@@ -58,6 +59,7 @@ def tick() -> None:
             risk = entry * 0.0025
             stop = entry - risk if side == "long" else entry + risk
             take = entry + risk * 2 if side == "long" else entry - risk * 2
+            equity -= COMMISSION
             positions.append({"s": x["s"], "side": side, "entry": entry, "stop": stop, "take": take, "u": 0.0})
 
 
