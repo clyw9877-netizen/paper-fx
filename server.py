@@ -92,7 +92,7 @@ def mark() -> None:
             done.append(s)
     for s in done:
         del positions[s]
-    if not positions:
+    while len(positions) < 2 and len(positions) < len(prices):
         maybe_open()
 
 
